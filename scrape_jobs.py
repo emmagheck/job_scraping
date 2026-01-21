@@ -93,48 +93,52 @@ def parse_arl_list_page(html: str, base_url: str):
     soup = BeautifulSoup(html, "html.parser")
 
     postings = []
-    # Each job is a <li> with an <h3> title and a "Read more »" link
+
+    # Each posting is a <li> that contains an <h3> and a link whose text includes "Read more"
     for li in soup.find_all("li"):
         h3 = li.find("h3")
         if not h3:
             continue
 
-        a = li.find("a", string=re.compile(r"Read more", re.I))
-        if not a or not a.get("href"):
-            continue
-
         title = clean_text(h3.get_text())
 
-        # The rest of the listing text is usually in the li text
+        # Find the "Read more" link by checking link text (more reliable than string=)
+        readmore = None
+        for a in li.find_all("a", href=True):
+            if "read more" in clean_text(a.get_text()).lower():
+                readmore = a
+                break
+        if not readmore:
+            continue
+
         text = clean_text(li.get_text(" "))
 
-        # Organization: usually the text right after title until "Job Location:"
-        # Example: "University at Albany Job Location: New York Apply By: ..."
-        org = ""
+        # Org = text between title and "Job Location:"
+        org = "Unknown"
         if "Job Location:" in text:
             before_loc = text.split("Job Location:", 1)[0]
-            # remove title from the front if it’s there
             if before_loc.startswith(title):
                 before_loc = before_loc[len(title):].strip()
-            org = clean_text(before_loc)
+            org = clean_text(before_loc) or "Unknown"
 
-        if not org:
-            org = "Unknown"
-
-        # State: pull from "Job Location: <StateName>"
+        # State name after "Job Location:" (ARL uses full state names like "New York")
         state = ""
         m = re.search(r"Job Location:\s*([A-Za-z ]+)", text)
         if m:
-            state = normalize_state(m.group(1))
+            state_name = clean_text(m.group(1))
+            state = US_STATE_TO_ABBR.get(state_name, "")
+            if state_name.lower() in {"washington dc", "district of columbia"}:
+                state = "DC"
 
-        detail_url = urljoin(base_url, a["href"])
+        detail_url = urljoin(base_url, readmore["href"])
         postings.append((title, org, state, detail_url))
 
-    # Pagination: "Next »"
+    # Pagination
     next_url = None
-    next_a = soup.find("a", string=lambda s: s and clean_text(s) == "Next »")
-    if next_a and next_a.get("href"):
-        next_url = urljoin(base_url, next_a["href"])
+    for a in soup.find_all("a", href=True):
+        if clean_text(a.get_text()) == "Next »":
+            next_url = urljoin(base_url, a["href"])
+            break
 
     # De-dupe by detail URL
     seen = set()
@@ -146,6 +150,7 @@ def parse_arl_list_page(html: str, base_url: str):
         out.append((t, o, s, u))
 
     return out, next_url
+
 
 
 
@@ -191,9 +196,9 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
                 organization=org[:255] if org else "Unknown",
                 state=state,
                 sector="Academic",
-                remote_type=remote_type,
+                remote_type=remote_type,   # <- make sure this is present
                 description=desc or f"Source: {durl}"
-            ))
+                ))
 
         url = next_url
 
