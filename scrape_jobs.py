@@ -37,6 +37,16 @@ def extract_state(text: str) -> str:
     return ""
 
 
+def normalize_state(name: str) -> str:
+    name = clean_text(name)
+    if not name:
+        return ""
+    # handle Washington DC labeling on ARL page
+    if name.lower() in {"washington dc", "district of columbia"}:
+        return "DC"
+    return US_STATE_TO_ABBR.get(name, "")
+
+
 ARL_START_URL = "https://www.arl.org/jobs/job-listings/"
 DEFAULT_HEADERS = {
     "User-Agent": "EmmaJobBoardBot/1.0 (+https://github.com/yourusername/yourrepo)"
@@ -83,57 +93,48 @@ def parse_arl_list_page(html: str, base_url: str):
     soup = BeautifulSoup(html, "html.parser")
 
     postings = []
-    for a in soup.find_all("a"):
-        if "Read more" not in clean_text(a.get_text()):
+    # Each job is a <li> with an <h3> title and a "Read more »" link
+    for li in soup.find_all("li"):
+        h3 = li.find("h3")
+        if not h3:
             continue
-        href = a.get("href")
-        if not href:
+
+        a = li.find("a", string=re.compile(r"Read more", re.I))
+        if not a or not a.get("href"):
             continue
-        detail_url = urljoin(base_url, href)
 
-      
-     # Walk upward to the nearest container that includes title + institution + Job Location
-        container = a
-        for _ in range(6):
-            if container.parent:
-                container = container.parent
-        text = clean_text(container.get_text(" "))
-        state = extract_state(text)
+        title = clean_text(h3.get_text())
 
+        # The rest of the listing text is usually in the li text
+        text = clean_text(li.get_text(" "))
 
-        # Title is usually the nearest preceding H3 on the page; try to find it by searching in the container
-        title = ""
-        h3 = container.find("h3")
-        if h3:
-            title = clean_text(h3.get_text())
-        if not title:
-            # fallback: first part of text before "Job Location:"
-            title = clean_text(text.split("Job Location:")[0])[:255]
-
-        # Institution usually appears right after title in the container text; use a heuristic:
-        # grab the first line after the title that isn't "Job Location..."
+        # Organization: usually the text right after title until "Job Location:"
+        # Example: "University at Albany Job Location: New York Apply By: ..."
         org = ""
-        # Try: find the first occurrence of title in text and take what comes after it
-        if title and title in text:
-            after = text.split(title, 1)[1].strip()
-            # org often ends right before "Job Location:"
-            if "Job Location:" in after:
-                org = clean_text(after.split("Job Location:", 1)[0])
-        org = org.replace("Apply By:", "").replace("Date Created:", "").strip()
+        if "Job Location:" in text:
+            before_loc = text.split("Job Location:", 1)[0]
+            # remove title from the front if it’s there
+            if before_loc.startswith(title):
+                before_loc = before_loc[len(title):].strip()
+            org = clean_text(before_loc)
+
         if not org:
             org = "Unknown"
 
-        # Job Location: <State>
+        # State: pull from "Job Location: <StateName>"
+        state = ""
+        m = re.search(r"Job Location:\s*([A-Za-z ]+)", text)
+        if m:
+            state = normalize_state(m.group(1))
+
+        detail_url = urljoin(base_url, a["href"])
         postings.append((title, org, state, detail_url))
 
-    # Find Next » pagination link
+    # Pagination: "Next »"
     next_url = None
-    for a in soup.find_all("a"):
-        if clean_text(a.get_text()) == "Next »":
-            href = a.get("href")
-            if href:
-                next_url = urljoin(base_url, href)
-            break
+    next_a = soup.find("a", string=lambda s: s and clean_text(s) == "Next »")
+    if next_a and next_a.get("href"):
+        next_url = urljoin(base_url, next_a["href"])
 
     # De-dupe by detail URL
     seen = set()
@@ -145,6 +146,7 @@ def parse_arl_list_page(html: str, base_url: str):
         out.append((t, o, s, u))
 
     return out, next_url
+
 
 
 def parse_arl_detail_page(html: str, url: str) -> str:
@@ -173,7 +175,7 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
             print(f"[ERROR] ARL list page fetch failed: {e}", file=sys.stderr)
             break
 
-        postings, next_url = parse_arl_list_page(html, url)
+            postings, next_url = parse_arl_list_page(html, url)
 
 
         for title, org, state, durl in postings:
@@ -189,6 +191,7 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
                 organization=org[:255] if org else "Unknown",
                 state=state,
                 sector="Academic",
+                remote_type=remote_type,
                 description=desc or f"Source: {durl}"
             ))
 
