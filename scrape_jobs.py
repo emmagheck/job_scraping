@@ -172,15 +172,16 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
     url = ARL_START_URL
     pages = 0
 
-    while url and pages < max_pages:
-        pages += 1
-        try:
-            html = fetch(url)
-        except Exception as e:
-            print(f"[ERROR] ARL list page fetch failed: {e}", file=sys.stderr)
-            break
-
-            postings, next_url = parse_arl_list_page(html, url)
+while url and pages < max_pages:
+    pages += 1
+    try:
+        html = fetch(url)
+        postings, next_url = parse_arl_list_page(html, url)
+        print(f"[INFO] ARL page {pages}: found {len(postings)} postings", file=sys.stderr)
+    except Exception as e:
+        print(f"[ERROR] ARL list page fetch failed: {e}", file=sys.stderr)
+        url = None
+        continue
 
 
         for title, org, state, durl in postings:
