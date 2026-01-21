@@ -208,7 +208,7 @@ while url and pages < max_pages:
     for r in rows:
         key = (r.title.strip().lower(), r.organization.strip().lower())
         uniq[key] = r
-    return list(uniq.values())
+        return list(uniq.values())
 
 
 
