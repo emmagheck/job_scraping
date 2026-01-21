@@ -91,13 +91,15 @@ def parse_arl_list_page(html: str, base_url: str):
             continue
         detail_url = urljoin(base_url, href)
 
-        # Walk upward to the nearest container that includes title + institution + Job Location
+      
+     # Walk upward to the nearest container that includes title + institution + Job Location
         container = a
         for _ in range(6):
             if container.parent:
                 container = container.parent
-
+        text = clean_text(container.get_text(" "))
         state = extract_state(text)
+
 
         # Title is usually the nearest preceding H3 on the page; try to find it by searching in the container
         title = ""
@@ -122,11 +124,6 @@ def parse_arl_list_page(html: str, base_url: str):
             org = "Unknown"
 
         # Job Location: <State>
-        state = ""
-        m = re.search(r"Job Location:\s*([^A-Za-z]*)([A-Za-z ]+)", text)
-        if m:
-            state = normalize_state(m.group(2))
-
         postings.append((title, org, state, detail_url))
 
     # Find Next » pagination link
@@ -176,7 +173,7 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
             print(f"[ERROR] ARL list page fetch failed: {e}", file=sys.stderr)
             break
 
-postings, next_url = parse_arl_list_page(html, url)
+        postings, next_url = parse_arl_list_page(html, url)
 
 
         for title, org, state, durl in postings:
