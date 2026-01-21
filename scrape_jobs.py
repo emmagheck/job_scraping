@@ -59,10 +59,24 @@ def clean_text(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
 
 
+import time
+import requests
+
 def fetch(url: str) -> str:
-    r = requests.get(url, headers=DEFAULT_HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.text
+    last_err = None
+    for attempt in range(1, 4):  # 3 attempts
+        try:
+            r = requests.get(url, headers=DEFAULT_HEADERS, timeout=60)
+            r.raise_for_status()
+            return r.text
+        except Exception as e:
+            last_err = e
+            # backoff: 2s, 4s, 8s
+            time.sleep(2 ** attempt)
+
+    # after retries, raise the last error
+    raise last_err
+
 
 
 def parse_arl_list_page(html: str, base_url: str):
@@ -156,8 +170,14 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
 
     while url and pages < max_pages:
         pages += 1
-        html = fetch(url)
-        postings, next_url = parse_arl_list_page(html, url)
+        try:
+            html = fetch(url)
+        except Exception as e:
+            print(f"[ERROR] ARL list page fetch failed: {e}", file=sys.stderr)
+            break
+
+postings, next_url = parse_arl_list_page(html, url)
+
 
         for title, org, state, durl in postings:
             desc = ""
