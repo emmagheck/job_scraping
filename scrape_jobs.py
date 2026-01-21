@@ -20,13 +20,21 @@ US_STATE_TO_ABBR = {
     "Wisconsin":"WI","Wyoming":"WY",
 }
 
-def normalize_state(val: str) -> str:
-    v = clean_text(val)
-    if not v:
-        return ""
-    if len(v) == 2 and v.isalpha():
-        return v.upper()
-    return US_STATE_TO_ABBR.get(v, "")
+STATE_ABBR = {
+    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS",
+    "KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY",
+    "NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV",
+    "WI","WY","DC"
+}
+
+
+def extract_state(text: str) -> str:
+    # Look for ", CA" or "(CA)" patterns
+    import re
+    m = re.search(r"\b([A-Z]{2})\b", text)
+    if m and m.group(1) in STATE_ABBR:
+        return m.group(1)
+    return ""
 
 
 ARL_START_URL = "https://www.arl.org/jobs/job-listings/"
@@ -75,7 +83,7 @@ def parse_arl_list_page(html: str, base_url: str):
             if container.parent:
                 container = container.parent
 
-        text = clean_text(container.get_text(" "))
+        state = extract_state(text)
 
         # Title is usually the nearest preceding H3 on the page; try to find it by searching in the container
         title = ""
@@ -158,7 +166,7 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
                 desc = parse_arl_detail_page(detail_html, durl)
             except Exception as e:
                 print(f"[WARN] Failed detail {durl}: {e}", file=sys.stderr)
-
+            remote_type = infer_remote_type(desc)
             rows.append(JobRow(
                 title=title[:255],
                 organization=org[:255] if org else "Unknown",
@@ -186,6 +194,19 @@ def scrape_ala_joblist_placeholder() -> List[JobRow]:
       - HTML parsing for their results pages.
     """
     return []
+
+
+def infer_remote_type(text: str) -> str:
+    t = text.lower()
+    if "fully remote" in t or "100% remote" in t:
+        return "Remote"
+    if "remote" in t and "hybrid" not in t:
+        return "Remote"
+    if "hybrid" in t:
+        return "Hybrid"
+    if "on-site" in t or "onsite" in t or "in person" in t:
+        return "Onsite"
+    return ""
 
 
 def write_csv(rows: List[JobRow], path: str) -> None:
