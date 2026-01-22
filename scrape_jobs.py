@@ -65,6 +65,7 @@ class JobRow:
     salary_max: str = ""
     date_posted: str = ""
     description: str = ""
+    apply_url: str = ""
 
 
 def clean_text(s: str) -> str:
@@ -232,6 +233,7 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
                 sector="Academic",
                 remote_type=remote_type,
                 date_posted=date_posted,
+                apply_url=durl,
                 description=desc or f"Source: {durl}"
             ))
 
@@ -270,7 +272,7 @@ def infer_remote_type(text: str) -> str:
 
 def write_csv(rows: List[JobRow], path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["title", "organization", "state", "sector", "remote_type", "salary_min", "salary_max", "date_posted", "description"])
+        writer = csv.DictWriter(f, fieldnames=["title", "organization", "state", "sector", "remote_type", "salary_min", "salary_max", "date_posted", "apply_url", "description"])
         writer.writeheader()
         for r in rows:
             writer.writerow({
@@ -282,6 +284,7 @@ def write_csv(rows: List[JobRow], path: str) -> None:
                 "salary_min": r.salary_min,
                 "salary_max": r.salary_max,
                 "date_posted": r.date_posted,
+                "apply_url": r.apply_url,
                 "description": r.description,
             })
 
