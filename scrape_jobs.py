@@ -283,6 +283,19 @@ def parse_date_any(s: str) -> str:
     except Exception:
         return ""
 
+ARCHIVESGIG_RSS = "https://archivesgig.com/feed/"
+
+def iso_date_from_entry(entry) -> str:
+    """Return YYYY-MM-DD or empty string."""
+    # feedparser gives you struct_time in *published_parsed* / *updated_parsed* when available
+    tm = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+    if not tm:
+        return ""
+    try:
+        return datetime(tm.tm_year, tm.tm_mon, tm.tm_mday).date().isoformat()
+    except Exception:
+        return ""
+
 def scrape_archivesgig(max_items: int = 80) -> List[JobRow]:
     rows: List[JobRow] = []
     d = feedparser.parse(ARCHIVESGIG_RSS)
@@ -290,10 +303,9 @@ def scrape_archivesgig(max_items: int = 80) -> List[JobRow]:
     for entry in (d.entries or [])[:max_items]:
         title = clean_text(getattr(entry, "title", ""))[:255]
         url = getattr(entry, "link", "") or ""
-        summary = clean_text(getattr(entry, "summary", ""))
 
-        # Try to grab a richer body if available
-        body = summary
+        # Prefer full content if available, otherwise summary
+        body = clean_text(getattr(entry, "summary", ""))
         if hasattr(entry, "content") and entry.content:
             try:
                 body = clean_text(entry.content[0].value)
@@ -303,31 +315,23 @@ def scrape_archivesgig(max_items: int = 80) -> List[JobRow]:
         text_for_inference = f"{title} {body}"
         state = extract_state(text_for_inference)
         remote_type = infer_remote_type(text_for_inference)
-
-        # Dates: prefer published, fall back to updated
-        date_posted = ""
-        if getattr(entry, "published", ""):
-            date_posted = parse_date_any(entry.published)
-        elif getattr(entry, "updated", ""):
-            date_posted = parse_date_any(entry.updated)
-
-        # Organization is not always explicit in ArchivesGig titles; leave Unknown for now
-        org = "Unknown"
+        date_posted = iso_date_from_entry(entry)
 
         rows.append(JobRow(
             title=title,
-            organization=org,
+            organization="Unknown",   # we can improve this later with heuristics
             state=state,
             sector="Other",
             remote_type=remote_type,
             salary_min="",
             salary_max="",
             date_posted=date_posted,
-            apply_url=url,
-            description=body[:4000] + (f"\n\nSource: {url}" if url else "")
+            apply_url=url,            # RSS link is your apply/source link
+            description=(body[:4000] + (f"\n\nSource: {url}" if url else ""))
         ))
 
     return rows
+
 
 def write_csv(rows: List[JobRow], path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
