@@ -62,6 +62,7 @@ class JobRow:
     remote_type: str = ""    # Remote/Hybrid/Onsite
     salary_min: str = ""
     salary_max: str = ""
+    date_posted: str = ""
     description: str = ""
 
 
@@ -151,6 +152,26 @@ def parse_arl_list_page(html: str, base_url: str):
 
     return out, next_url
 
+def extract_date_posted(text: str) -> str:
+    m = re.search(r"Date Created:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})", text)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def clean_description(text: str) -> str:
+    junk_phrases = [
+        "share",
+        "tweet",
+        "email",
+        "print",
+        "facebook",
+        "linkedin",
+    ]
+    for phrase in junk_phrases:
+        text = re.sub(rf"\b{phrase}\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 
@@ -161,7 +182,7 @@ def parse_arl_detail_page(html: str, url: str) -> str:
     main = soup.find("article") or soup.find("main") or soup
 
     # Prefer a "Description" section if present
-    text = clean_text(main.get_text(" "))
+    text = clean_description(clean_text(main.get_text(" ")))
     # Keep it shorter so your Django field doesn't get spammed
     return f"{text[:4000]}\n\nSource: {url}"
 
@@ -185,7 +206,10 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
             desc = ""
             try:
                 detail_html = fetch(durl)
+                raw_text = clean_text(detail_html)
+                date_posted = extract_date_posted(raw_text)
                 desc = parse_arl_detail_page(detail_html, durl)
+
             except Exception as e:
                 print(f"[WARN] Failed detail {durl}: {e}", file=sys.stderr)
 
@@ -197,6 +221,7 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
                 state=state,
                 sector="Academic",
                 remote_type=remote_type,
+                date_posted=date_posted,
                 description=desc or f"Source: {durl}"
             ))
 
@@ -237,7 +262,9 @@ def write_csv(rows: List[JobRow], path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["title","organization","state","sector","remote_type","salary_min","salary_max","description"]
+            fieldnames=["title", "organization", "state", "sector", "remote_type", "salary_min", "salary_max", "date_posted", "description"]
+]
+
         )
         writer.writeheader()
         for r in rows:
@@ -249,6 +276,7 @@ def write_csv(rows: List[JobRow], path: str) -> None:
                 "remote_type": r.remote_type,
                 "salary_min": r.salary_min,
                 "salary_max": r.salary_max,
+                "date_posted": r.date_posted,
                 "description": r.description,
             })
 
