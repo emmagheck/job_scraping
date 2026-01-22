@@ -39,6 +39,6 @@ jobs:
             echo "jobs.csv is empty (header only). Not committing."
             exit 0
           fi
-        git add jobs.csv
-        git commit -m "Update jobs.csv" || echo "No changes to commit"
-        git push
+          git add jobs.csv
+          git commit -m "Update jobs.csv" || echo "No changes to commit"
+          git push
