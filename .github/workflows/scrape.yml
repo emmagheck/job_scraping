@@ -26,6 +26,22 @@ jobs:
           ls -lah jobs.csv || true
           head -n 5 jobs.csv || true
 
+      - name: Debug git state
+        run: |
+          echo "Branch:"
+          git branch --show-current || true
+          echo "HEAD:"
+          git rev-parse HEAD
+          git log -1 --oneline
+          echo "Git status:"
+          git status
+
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
       - name: Commit jobs.csv if non-empty
         run: |
           if [ ! -f jobs.csv ]; then
@@ -39,6 +55,17 @@ jobs:
             echo "jobs.csv is empty (header only). Not committing."
             exit 0
           fi
+          pwd
+          ls -lah
+          echo "=== jobs.csv preview ==="
+          wc -l jobs.csv || true
+          head -n 3 jobs.csv || true
+          tail -n 3 jobs.csv || true
+
+          echo "=== git status before add ==="
+          git status
+          git diff --stat || true
+
           git add jobs.csv
           git commit -m "Update jobs.csv" || echo "No changes to commit"
           git push
