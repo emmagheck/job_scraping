@@ -242,6 +242,8 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
 
         url = next_url
 
+        return rows
+
 def scrape_ala_joblist_placeholder() -> List[JobRow]:
     """
     Placeholder because ALA JobLIST is currently serving a maintenance page.
