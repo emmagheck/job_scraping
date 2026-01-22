@@ -20,6 +20,11 @@ jobs:
 
       - name: Run scraper
         run: python scrape_jobs.py
+        
+      - name: Show first lines of jobs.csv
+        run: |
+          ls -lah jobs.csv || true
+          head -n 5 jobs.csv || true
 
       - name: Commit jobs.csv if non-empty
         run: |
