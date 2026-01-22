@@ -1,5 +1,8 @@
 name: Scrape library jobs
 
+permissions:
+  contents: write
+  
 on:
   schedule:
     - cron: "0 13 * * *"  # daily at 13:00 UTC (adjust as you like)
