@@ -4,6 +4,7 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional
 from urllib.parse import urljoin
+from datetime import datetime
 
 import requests
 from bs4 import BeautifulSoup
@@ -153,9 +154,18 @@ def parse_arl_list_page(html: str, base_url: str):
     return out, next_url
 
 def extract_date_posted(text: str) -> str:
-    m = re.search(r"Date Created:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})", text)
+    # Match: Date Created: 01/22/2026
+    m = re.search(r"Date Created:\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})", text, flags=re.I)
     if m:
-        return m.group(1)
+        dt = datetime.strptime(m.group(1), "%m/%d/%Y").date()
+        return dt.isoformat()  # YYYY-MM-DD
+
+    # Match: Date Created: January 22, 2026
+    m = re.search(r"Date Created:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})", text, flags=re.I)
+    if m:
+        dt = datetime.strptime(m.group(1), "%B %d, %Y").date()
+        return dt.isoformat()
+
     return ""
 
 
@@ -207,8 +217,8 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
             try:
                 detail_html = fetch(durl)
                 raw_text = clean_text(detail_html)
-                date_posted = extract_date_posted(raw_text)
                 desc = parse_arl_detail_page(detail_html, durl)
+                date_posted = extract_date_posted(desc)
 
             except Exception as e:
                 print(f"[WARN] Failed detail {durl}: {e}", file=sys.stderr)
