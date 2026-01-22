@@ -242,43 +242,6 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
 
         url = next_url
 
-# De-dupe across sources
-# (normalized title + normalized org) is the primary key.
-# If org is missing/Unknown, fall back to URL-based key.
-uniq = {}
-for r in rows:
-    title_key = canonicalize(r.title)
-    org_key = canonicalize(r.organization)
-
-    if not org_key or org_key in {"unknown", "n/a", "-"}:
-        key = ("url", canonicalize(r.apply_url))
-    else:
-        key = ("job", title_key, org_key)
-
-    # Keep the "better" record if a duplicate exists:
-    # prefer one with apply_url, then date_posted, then longer description.
-    existing = uniq.get(key)
-    if not existing:
-        uniq[key] = r
-        continue
-
-    def score(x: JobRow) -> int:
-        s = 0
-        if x.apply_url: s += 3
-        if x.date_posted: s += 2
-        if x.state: s += 1
-        if x.remote_type: s += 1
-        if x.salary_min or x.salary_max: s += 1
-        s += min(len(x.description or ""), 2000) // 500  # 0..4-ish
-        return s
-
-    if score(r) > score(existing):
-        uniq[key] = r
-
-    return list(uniq.values())
-
-
-
 def scrape_ala_joblist_placeholder() -> List[JobRow]:
     """
     Placeholder because ALA JobLIST is currently serving a maintenance page.
@@ -420,12 +383,44 @@ def write_csv(rows: List[JobRow], path: str) -> None:
                 "description": r.description,
             })
 
+def dedupe_rows(rows: List[JobRow]) -> List[JobRow]:
+    uniq = {}
+
+    for r in rows:
+        title_key = canonicalize(r.title)
+        org_key = canonicalize(r.organization)
+
+        if not org_key or org_key in {"unknown", "n/a", "-"}:
+            key = ("url", canonicalize(r.apply_url))
+        else:
+            key = ("job", title_key, org_key)
+
+        existing = uniq.get(key)
+        if not existing:
+            uniq[key] = r
+            continue
+
+        def score(x: JobRow) -> int:
+            s = 0
+            if x.apply_url: s += 3
+            if x.date_posted: s += 2
+            if x.state: s += 1
+            if x.remote_type: s += 1
+            if x.salary_min or x.salary_max: s += 1
+            s += min(len(x.description or ""), 2000) // 500
+            return s
+
+        if score(r) > score(existing):
+            uniq[key] = r
+
+    return list(uniq.values())
+
 
 if __name__ == "__main__":
     rows = []
     rows += scrape_arl(max_pages=5)
     rows += scrape_ala_joblist_placeholder()
     rows += scrape_archivesgig(max_items=80)
-
+    rows = dedupe_rows(rows)
     write_csv(rows, "jobs.csv")
     print(f"Wrote {len(rows)} jobs to jobs.csv")
