@@ -239,7 +239,7 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
         # IMPORTANT: this must run once per page (not inside the for-loop)
         url = next_url
 
-        return rows
+    return rows
 
 def scrape_ala_joblist_placeholder() -> List[JobRow]:
     """
