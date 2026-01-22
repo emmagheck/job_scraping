@@ -1,10 +1,11 @@
 import csv
 import re
 import sys
+import feedparser
 from dataclasses import dataclass
 from typing import List, Optional
 from urllib.parse import urljoin
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 from bs4 import BeautifulSoup
@@ -27,6 +28,8 @@ STATE_ABBR = {
     "NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV",
     "WI","WY","DC"
 }
+
+ARCHIVESGIG_RSS = "https://archivesgig.com/feed/"
 
 
 def extract_state(text: str) -> str:
@@ -242,7 +245,7 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
     # De-dupe by title+org
     uniq = {}
     for r in rows:
-        key = (r.title.strip().lower(), r.organization.strip().lower())
+        key = (r.title.strip().lower(), r.apply_url.strip().lower())
         uniq[key] = r
     return list(uniq.values())
 
@@ -269,6 +272,62 @@ def infer_remote_type(text: str) -> str:
         return "Onsite"
     return ""
 
+def parse_date_any(s: str) -> str:
+    """Return YYYY-MM-DD or empty string."""
+    if not s:
+        return ""
+    try:
+        # feedparser often provides a parsed struct_time too, but this is a safe fallback
+        dt = datetime(*feedparser._parse_date(s)[:6], tzinfo=timezone.utc)  # type: ignore
+        return dt.date().isoformat()
+    except Exception:
+        return ""
+
+def scrape_archivesgig(max_items: int = 80) -> List[JobRow]:
+    rows: List[JobRow] = []
+    d = feedparser.parse(ARCHIVESGIG_RSS)
+
+    for entry in (d.entries or [])[:max_items]:
+        title = clean_text(getattr(entry, "title", ""))[:255]
+        url = getattr(entry, "link", "") or ""
+        summary = clean_text(getattr(entry, "summary", ""))
+
+        # Try to grab a richer body if available
+        body = summary
+        if hasattr(entry, "content") and entry.content:
+            try:
+                body = clean_text(entry.content[0].value)
+            except Exception:
+                pass
+
+        text_for_inference = f"{title} {body}"
+        state = extract_state(text_for_inference)
+        remote_type = infer_remote_type(text_for_inference)
+
+        # Dates: prefer published, fall back to updated
+        date_posted = ""
+        if getattr(entry, "published", ""):
+            date_posted = parse_date_any(entry.published)
+        elif getattr(entry, "updated", ""):
+            date_posted = parse_date_any(entry.updated)
+
+        # Organization is not always explicit in ArchivesGig titles; leave Unknown for now
+        org = "Unknown"
+
+        rows.append(JobRow(
+            title=title,
+            organization=org,
+            state=state,
+            sector="Other",
+            remote_type=remote_type,
+            salary_min="",
+            salary_max="",
+            date_posted=date_posted,
+            apply_url=url,
+            description=body[:4000] + (f"\n\nSource: {url}" if url else "")
+        ))
+
+    return rows
 
 def write_csv(rows: List[JobRow], path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -293,6 +352,7 @@ if __name__ == "__main__":
     rows = []
     rows += scrape_arl(max_pages=5)
     rows += scrape_ala_joblist_placeholder()
+    rows += scrape_archivesgig(max_items=80)
 
     write_csv(rows, "jobs.csv")
     print(f"Wrote {len(rows)} jobs to jobs.csv")
