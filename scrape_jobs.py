@@ -260,12 +260,7 @@ def infer_remote_type(text: str) -> str:
 
 def write_csv(rows: List[JobRow], path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["title", "organization", "state", "sector", "remote_type", "salary_min", "salary_max", "date_posted", "description"]
-]
-
-        )
+        writer = csv.DictWriter(f, fieldnames=["title", "organization", "state", "sector", "remote_type", "salary_min", "salary_max", "date_posted", "description"])
         writer.writeheader()
         for r in rows:
             writer.writerow({
