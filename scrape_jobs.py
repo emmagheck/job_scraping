@@ -275,7 +275,7 @@ for r in rows:
     if score(r) > score(existing):
         uniq[key] = r
 
-return list(uniq.values())
+    return list(uniq.values())
 
 
 
