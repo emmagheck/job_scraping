@@ -242,12 +242,41 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
 
         url = next_url
 
-    # De-dupe by title+org
-    uniq = {}
-    for r in rows:
-        key = (r.title.strip().lower(), r.apply_url.strip().lower())
+# De-dupe across sources
+# (normalized title + normalized org) is the primary key.
+# If org is missing/Unknown, fall back to URL-based key.
+uniq = {}
+for r in rows:
+    title_key = canonicalize(r.title)
+    org_key = canonicalize(r.organization)
+
+    if not org_key or org_key in {"unknown", "n/a", "-"}:
+        key = ("url", canonicalize(r.apply_url))
+    else:
+        key = ("job", title_key, org_key)
+
+    # Keep the "better" record if a duplicate exists:
+    # prefer one with apply_url, then date_posted, then longer description.
+    existing = uniq.get(key)
+    if not existing:
         uniq[key] = r
-    return list(uniq.values())
+        continue
+
+    def score(x: JobRow) -> int:
+        s = 0
+        if x.apply_url: s += 3
+        if x.date_posted: s += 2
+        if x.state: s += 1
+        if x.remote_type: s += 1
+        if x.salary_min or x.salary_max: s += 1
+        s += min(len(x.description or ""), 2000) // 500  # 0..4-ish
+        return s
+
+    if score(r) > score(existing):
+        uniq[key] = r
+
+return list(uniq.values())
+
 
 
 def scrape_ala_joblist_placeholder() -> List[JobRow]:
@@ -296,12 +325,48 @@ def iso_date_from_entry(entry) -> str:
     except Exception:
         return ""
 
+def canonicalize(s: str) -> str:
+    s = clean_text(s).lower()
+    s = s.replace("—", "-").replace("–", "-")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def parse_archivesgig_title(raw_title: str):
+    """
+    ArchivesGig titles often look like:
+      'City, ST: Job Title, Organization'
+      'Remote: Job Title, Organization'
+      'Job Title, Organization'
+    Return: (title, org, state_guess)
+    """
+    t = clean_text(raw_title)
+    state_guess = ""
+
+    # City, ST: ...
+    m = re.match(r"^.*,\s*([A-Z]{2})\s*:\s*(.*)$", t)
+    if m and m.group(1) in STATE_ABBR:
+        state_guess = m.group(1)
+        t = m.group(2)
+
+    # Remote/Hybrid/Onsite prefix
+    t = re.sub(r"^(remote|hybrid|onsite|on-site|in person)\s*:\s*", "", t, flags=re.I)
+
+    # Split on last comma -> org is often the last chunk
+    org = ""
+    title = t
+    if ", " in t:
+        title, org = t.rsplit(", ", 1)
+
+    return clean_text(title), clean_text(org), state_guess
+
 def scrape_archivesgig(max_items: int = 80) -> List[JobRow]:
     rows: List[JobRow] = []
     d = feedparser.parse(ARCHIVESGIG_RSS)
 
     for entry in (d.entries or [])[:max_items]:
-        title = clean_text(getattr(entry, "title", ""))[:255]
+        raw_title = getattr(entry, "title", "") or ""
+        title, org_from_title, state_from_title = parse_archivesgig_title(raw_title)
+
         url = getattr(entry, "link", "") or ""
 
         # Prefer full content if available, otherwise summary
@@ -312,25 +377,29 @@ def scrape_archivesgig(max_items: int = 80) -> List[JobRow]:
             except Exception:
                 pass
 
-        text_for_inference = f"{title} {body}"
-        state = extract_state(text_for_inference)
+        text_for_inference = f"{title} {org_from_title} {body}"
+
+        # Prefer the state in the prefix if present, otherwise infer
+        state = state_from_title or extract_state(text_for_inference)
+
         remote_type = infer_remote_type(text_for_inference)
         date_posted = iso_date_from_entry(entry)
 
         rows.append(JobRow(
-            title=title,
-            organization="Unknown",   # we can improve this later with heuristics
+            title=title[:255] if title else clean_text(raw_title)[:255],
+            organization=org_from_title[:255] if org_from_title else "Unknown",
             state=state,
             sector="Other",
             remote_type=remote_type,
             salary_min="",
             salary_max="",
             date_posted=date_posted,
-            apply_url=url,            # RSS link is your apply/source link
+            apply_url=url,
             description=(body[:4000] + (f"\n\nSource: {url}" if url else ""))
         ))
 
     return rows
+
 
 
 def write_csv(rows: List[JobRow], path: str) -> None:
