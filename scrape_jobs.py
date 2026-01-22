@@ -221,26 +221,22 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
             desc = ""
             try:
                 detail_html = fetch(durl)
-                raw_text = clean_text(detail_html)
                 desc = parse_arl_detail_page(detail_html, durl)
-                date_posted = extract_date_posted(desc)
-
             except Exception as e:
                 print(f"[WARN] Failed detail {durl}: {e}", file=sys.stderr)
 
             remote_type = infer_remote_type(desc)
-
             rows.append(JobRow(
                 title=title[:255],
                 organization=org[:255] if org else "Unknown",
                 state=state,
                 sector="Academic",
                 remote_type=remote_type,
-                date_posted=date_posted,
-                apply_url=durl,
-                description=desc or f"Source: {durl}"
+                description=desc or f"Source: {durl}",
+                apply_url=durl,  # keep a URL for dedupe/import even if it's just the detail page
             ))
 
+        # IMPORTANT: this must run once per page (not inside the for-loop)
         url = next_url
 
         return rows
