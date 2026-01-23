@@ -371,6 +371,31 @@ HIGHEREDJOBS_FEEDS = [
     ("https://www.higheredjobs.com/rss/categoryFeed.cfm?catID=34",  "HigherEdJobs (catID 34)"),
 ]
 
+def parse_higheredjobs_org_from_detail(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    a = soup.select_one("div.job-inst a")
+    if a:
+        return clean_text(a.get_text())
+    div = soup.select_one("div.job-inst")
+    if div:
+        return clean_text(div.get_text())
+    return ""
+
+def parse_higheredjobs_apply_url_from_detail(html: str, base_url: str = "https://www.higheredjobs.com") -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    a = soup.select_one("a#js-applyurl")
+    if not a:
+        return ""
+    # Prefer the real external employer URL if present
+    real = a.get("data-orig-href")
+    if real:
+        return real
+    href = a.get("href") or ""
+    if href.startswith("/"):
+        return urljoin(base_url, href)
+    return href
+
+
 def split_title_org(raw_title: str):
     """
     Many job feeds use patterns like:
@@ -409,23 +434,46 @@ def scrape_higheredjobs_feed(feed_url: str, sector: str, max_items: int = 200) -
     for entry in entries[:max_items]:
         title = clean_text(getattr(entry, "title", ""))[:255]
         url = getattr(entry, "link", "") or ""
-        body = clean_text(getattr(entry, "summary", ""))
 
-        text_for_inference = f"{title} {body}"
+        # Keep raw HTML for parsing institution/apply link
+        raw_body = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
+        body = clean_text(raw_body)
+
+        organization = "Unknown"
+        apply_url = url  # default: RSS link
+
+                # Fetch the detail page to get institution + real apply URL
+        if url:
+            try:
+                detail_html = fetch(url)
+
+                org_detail = parse_higheredjobs_org_from_detail(detail_html)
+                if org_detail:
+                    organization = org_detail[:255]
+
+                apply_detail = parse_higheredjobs_apply_url_from_detail(detail_html)
+                if apply_detail:
+                    apply_url = apply_detail
+            except Exception as e:
+                print(f"[WARN] HigherEdJobs detail fetch failed: {url} ({e})", file=sys.stderr)
+
+
+
+        text_for_inference = f"{title} {organization} {body}"
         state = extract_state(text_for_inference)
         remote_type = infer_remote_type(text_for_inference)
         date_posted = iso_date_from_entry(entry)
 
         rows.append(JobRow(
             title=title,
-            organization="Unknown",
+            organization=organization,
             state=state,
             sector=sector,
             remote_type=remote_type,
             salary_min="",
             salary_max="",
             date_posted=date_posted,
-            apply_url=url,
+            apply_url=apply_url,
             description=(body[:4000] + (f"\n\nSource: {url}" if url else "")),
         ))
 
