@@ -384,55 +384,45 @@ def split_title_org(raw_title: str):
                 return left, right
     return t, ""
 
-def scrape_higheredjobs_feed(feed_url: str, source_label: str, max_items: int = 100) -> List[JobRow]:
-    """
-    RSS -> JobRow
-    Uses entry.title, entry.link, entry.summary/description/content, entry.published.
-    """
+def scrape_higheredjobs_feed(feed_url: str, sector: str, max_items: int = 200) -> List[JobRow]:
     rows: List[JobRow] = []
 
-    # Fetch XML ourselves so we can control headers/timeouts (some feeds dislike feedparser's default)
-    try:
-        xml = fetch(feed_url)
-    except Exception as e:
-        print(f"[ERROR] HigherEdJobs fetch failed ({source_label}): {e}", file=sys.stderr)
-        return rows
+    xml = fetch(feed_url)  # uses requests.get + raise_for_status
+
+    # --- DEBUG: confirm we got RSS/XML, not an HTML block page ---
+    head = xml.lstrip()[:200].lower()
+    if not (head.startswith("<?xml") or "<rss" in head or "<feed" in head):
+        print(f"[WARN] HigherEdJobs feed did not look like RSS. First 200 chars:\n{xml[:200]}", file=sys.stderr)
+        return []
 
     d = feedparser.parse(xml)
+    if getattr(d, "bozo", 0):
+        print(f"[WARN] HigherEdJobs feedparser bozo=1: {getattr(d,'bozo_exception',None)}", file=sys.stderr)
+
     entries = d.entries or []
-    print(f"[INFO] {source_label}: found {len(entries)} entries", file=sys.stderr)
+    print(f"[INFO] HigherEdJobs ({sector}): found {len(entries)} entries", file=sys.stderr)
 
     for entry in entries[:max_items]:
-        raw_title = getattr(entry, "title", "") or ""
-        link = getattr(entry, "link", "") or ""
+        title = clean_text(getattr(entry, "title", ""))[:255]
+        url = getattr(entry, "link", "") or ""
+        body = clean_text(getattr(entry, "summary", ""))
 
-        # Prefer full content -> summary
-        body = clean_text(getattr(entry, "summary", "") or getattr(entry, "description", ""))
-        if hasattr(entry, "content") and entry.content:
-            try:
-                body = clean_text(entry.content[0].value)
-            except Exception:
-                pass
-
-        # Try to pull organization from title; otherwise leave Unknown
-        title, org_from_title = split_title_org(raw_title)
-
-        text_for_inference = f"{title} {org_from_title} {body}"
+        text_for_inference = f"{title} {body}"
         state = extract_state(text_for_inference)
         remote_type = infer_remote_type(text_for_inference)
         date_posted = iso_date_from_entry(entry)
 
         rows.append(JobRow(
-            title=title[:255] if title else clean_text(raw_title)[:255],
-            organization=(org_from_title[:255] if org_from_title else "Unknown"),
+            title=title,
+            organization="Unknown",
             state=state,
-            sector="Academic",
+            sector=sector,
             remote_type=remote_type,
             salary_min="",
             salary_max="",
             date_posted=date_posted,
-            apply_url=link,  # HigherEdJobs link is a good “apply/source” link
-            description=(body[:4000] + (f"\n\nSource: {link}" if link else "")),
+            apply_url=url,
+            description=(body[:4000] + (f"\n\nSource: {url}" if url else "")),
         ))
 
     return rows
@@ -440,7 +430,9 @@ def scrape_higheredjobs_feed(feed_url: str, source_label: str, max_items: int = 
 def scrape_higheredjobs_all(max_items_each: int = 100) -> List[JobRow]:
     rows: List[JobRow] = []
     for url, label in HIGHEREDJOBS_FEEDS:
-        rows += scrape_higheredjobs_feed(url, label, max_items=max_items_each)
+        rows += scrape_higheredjobs_feed("https://www.higheredjobs.com/rss/categoryFeed.cfm?catID=182", "Academic")
+        rows += scrape_higheredjobs_feed("https://www.higheredjobs.com/rss/categoryFeed.cfm?catID=34", "Academic")
+
     return rows
 
 
