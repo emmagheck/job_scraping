@@ -362,6 +362,86 @@ def scrape_archivesgig(max_items: int = 80) -> List[JobRow]:
 
     return rows
 
+HIGHEREDJOBS_FEEDS = [
+    ("https://www.higheredjobs.com/rss/categoryFeed.cfm?catID=182", "HigherEdJobs (Library & Info Science)"),
+    ("https://www.higheredjobs.com/rss/categoryFeed.cfm?catID=34",  "HigherEdJobs (catID 34)"),
+]
+
+def split_title_org(raw_title: str):
+    """
+    Many job feeds use patterns like:
+      'Job Title - University Name'
+      'Job Title — University Name'
+    Returns (title, org)
+    """
+    t = clean_text(raw_title)
+    for sep in [" — ", " - ", " – "]:
+        if sep in t:
+            left, right = t.split(sep, 1)
+            left, right = clean_text(left), clean_text(right)
+            # avoid bad splits on titles that contain hyphens
+            if left and right and len(right) <= 80:
+                return left, right
+    return t, ""
+
+def scrape_higheredjobs_feed(feed_url: str, source_label: str, max_items: int = 100) -> List[JobRow]:
+    """
+    RSS -> JobRow
+    Uses entry.title, entry.link, entry.summary/description/content, entry.published.
+    """
+    rows: List[JobRow] = []
+
+    # Fetch XML ourselves so we can control headers/timeouts (some feeds dislike feedparser's default)
+    try:
+        xml = fetch(feed_url)
+    except Exception as e:
+        print(f"[ERROR] HigherEdJobs fetch failed ({source_label}): {e}", file=sys.stderr)
+        return rows
+
+    d = feedparser.parse(xml)
+    entries = d.entries or []
+    print(f"[INFO] {source_label}: found {len(entries)} entries", file=sys.stderr)
+
+    for entry in entries[:max_items]:
+        raw_title = getattr(entry, "title", "") or ""
+        link = getattr(entry, "link", "") or ""
+
+        # Prefer full content -> summary
+        body = clean_text(getattr(entry, "summary", "") or getattr(entry, "description", ""))
+        if hasattr(entry, "content") and entry.content:
+            try:
+                body = clean_text(entry.content[0].value)
+            except Exception:
+                pass
+
+        # Try to pull organization from title; otherwise leave Unknown
+        title, org_from_title = split_title_org(raw_title)
+
+        text_for_inference = f"{title} {org_from_title} {body}"
+        state = extract_state(text_for_inference)
+        remote_type = infer_remote_type(text_for_inference)
+        date_posted = iso_date_from_entry(entry)
+
+        rows.append(JobRow(
+            title=title[:255] if title else clean_text(raw_title)[:255],
+            organization=(org_from_title[:255] if org_from_title else "Unknown"),
+            state=state,
+            sector="Academic",
+            remote_type=remote_type,
+            salary_min="",
+            salary_max="",
+            date_posted=date_posted,
+            apply_url=link,  # HigherEdJobs link is a good “apply/source” link
+            description=(body[:4000] + (f"\n\nSource: {link}" if link else "")),
+        ))
+
+    return rows
+
+def scrape_higheredjobs_all(max_items_each: int = 100) -> List[JobRow]:
+    rows: List[JobRow] = []
+    for url, label in HIGHEREDJOBS_FEEDS:
+        rows += scrape_higheredjobs_feed(url, label, max_items=max_items_each)
+    return rows
 
 
 def write_csv(rows: List[JobRow], path: str) -> None:
@@ -420,6 +500,7 @@ if __name__ == "__main__":
     rows += scrape_arl(max_pages=5)
     rows += scrape_ala_joblist_placeholder()
     rows += scrape_archivesgig(max_items=80)
+    rows += scrape_higheredjobs_all(max_items_each=120)
     rows = dedupe_rows(rows)
     write_csv(rows, "jobs.csv")
     print(f"Wrote {len(rows)} jobs to jobs.csv")
