@@ -234,7 +234,7 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
                 title=title[:255],
                 organization=org[:255] if org else "Unknown",
                 state=state,
-                sector="Academic",
+                sector=infer_sector(title, org, desc),
                 remote_type=remote_type,
                 description=desc or f"Source: {durl}",
                 apply_url=durl,  # keep a URL for dedupe/import even if it's just the detail page
@@ -266,6 +266,74 @@ def infer_remote_type(text: str) -> str:
     if "on-site" in t or "onsite" in t or "in person" in t:
         return "Onsite"
     return ""
+
+def infer_sector(title: str, organization: str, description: str) -> str:
+    text = f"{title} {organization} {description}".lower()
+
+    # --- Museum first (so "museum library" doesn't become Public/Academic) ---
+    museum_terms = [
+        "museum", "curator", "curatorial", "collections manager", "registrar",
+        "exhibitions", "exhibit", "gallery", "conservation", "conservator",
+        "archives and museum", "museum archives", "museum librarian",
+    ]
+    if any(t in text for t in museum_terms):
+        return "Museum"
+
+    # --- Government ---
+    gov_terms = [
+        "library of congress", "national archives", "state archives", "county",
+        "city of ", "department of ", "dept. of ", "ministry", "government",
+        "federal", "state of ", "commonwealth", "municipal", "public records",
+        "secretary of state", "u.s.", "us ", "usa", "courthouse",
+    ]
+    gov_domains = [".gov", ".mil"]
+    if any(t in text for t in gov_terms) or any(d in text for d in gov_domains):
+        return "Government"
+
+    # --- Academic ---
+    academic_terms = [
+        "university", "college", "community college", "campus",
+        "school of", "faculty", "student", "academic", "higher ed",
+        "library services (university)", "research library",
+    ]
+    if any(t in text for t in academic_terms):
+        return "Academic"
+
+    # --- Medical ---
+    medical_terms = [
+        "hospital", "health", "medical", "clinic", "medicine",
+        "nursing", "clinical", "patient", "health sciences",
+    ]
+    if any(t in text for t in medical_terms):
+        return "Medical"
+
+    # --- Corporate ---
+    corporate_terms = [
+        "inc.", "llc", "l.l.c", "corporation", "corp", "company",
+        "systems", "solutions", "consulting", "vendor", "sales",
+        "client", "product", "startup",
+    ]
+    if any(t in text for t in corporate_terms):
+        return "Corporate"
+
+    # --- Nonprofit ---
+    nonprofit_terms = [
+        "foundation", "nonprofit", "non-profit", "charity",
+        "association", "society", "institute", "ngo",
+    ]
+    if any(t in text for t in nonprofit_terms):
+        return "Nonprofit"
+
+    # --- Public (public library / public-facing library system) ---
+    public_terms = [
+        "public library", "library system", "branch library",
+        "county library", "city library", "municipal library",
+    ]
+    if any(t in text for t in public_terms):
+        return "Public"
+
+    return "Other"
+
 
 def parse_date_any(s: str) -> str:
     """Return YYYY-MM-DD or empty string."""
@@ -355,7 +423,7 @@ def scrape_archivesgig(max_items: int = 80) -> List[JobRow]:
             title=title[:255] if title else clean_text(raw_title)[:255],
             organization=org_from_title[:255] if org_from_title else "Unknown",
             state=state,
-            sector="Other",
+            sector=infer_sector(title, "Unknown", body),
             remote_type=remote_type,
             salary_min="",
             salary_max="",
@@ -468,7 +536,7 @@ def scrape_higheredjobs_feed(feed_url: str, sector: str, max_items: int = 200) -
             title=title,
             organization=organization,
             state=state,
-            sector=sector,
+            sector=infer_sector(title, organization, body),
             remote_type=remote_type,
             salary_min="",
             salary_max="",
