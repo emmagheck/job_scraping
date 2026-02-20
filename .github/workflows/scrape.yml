@@ -1,20 +1,103 @@
+# name: Scrape library jobs
+
+# permissions:
+#   contents: write
+  
+# on:
+#   schedule:
+#     - cron: "0 13 * * *"  # daily at 13:00 UTC (adjust as you like)
+#   workflow_dispatch:
+
+# jobs:
+#   scrape:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+
+#       - uses: actions/setup-python@v5
+#         with:
+#           python-version: "3.11"
+
+#       - name: Install dependencies
+#         run: pip install -r requirements.txt
+
+#       - name: Run scraper
+#         run: python scrape_jobs.py
+        
+#       - name: Show first lines of jobs.csv
+#         run: |
+#           ls -lah jobs.csv || true
+#           head -n 5 jobs.csv || true
+
+#       - name: Debug git state
+#         run: |
+#           echo "Branch:"
+#           git branch --show-current || true
+#           echo "HEAD:"
+#           git rev-parse HEAD
+#           git log -1 --oneline
+#           echo "Git status:"
+#           git status
+
+
+#       - name: Configure git
+#         run: |
+#           git config user.name "github-actions"
+#           git config user.email "github-actions@github.com"
+
+#       - name: Commit jobs.csv if non-empty
+#         run: |
+#           if [ ! -f jobs.csv ]; then
+#             echo "jobs.csv missing; nothing to commit"
+#             exit 0
+#           fi
+#           # Header-only CSV has 1 line. Require at least 2 lines.
+#           LINES=$(wc -l < jobs.csv | tr -d ' ')
+#           echo "jobs.csv line count: $LINES"
+#           if [ "$LINES" -le 1 ]; then
+#             echo "jobs.csv is empty (header only). Not committing."
+#             exit 0
+#           fi
+#           pwd
+#           ls -lah
+#           echo "=== jobs.csv preview ==="
+#           wc -l jobs.csv || true
+#           head -n 3 jobs.csv || true
+#           tail -n 3 jobs.csv || true
+
+#           echo "=== git status before add ==="
+#           git status
+#           git diff --stat || true
+
+#           git add jobs.csv
+#           git commit -m "Update jobs.csv" || echo "No changes to commit"
+#           git push
+
+
+
 name: Scrape library jobs
 
 permissions:
   contents: write
-  
+
 on:
   schedule:
-    - cron: "0 13 * * *"  # daily at 13:00 UTC (adjust as you like)
+    - cron: "0 13 * * *"  # daily at 13:00 UTC
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -23,52 +106,62 @@ jobs:
 
       - name: Run scraper
         run: python scrape_jobs.py
-        
-      - name: Show first lines of jobs.csv
+
+      - name: Debug - show jobs.csv + git state
         run: |
+          echo "PWD:"
+          pwd
+          echo "List repo root:"
+          ls -la
+          echo "Find CSV files:"
+          find . -maxdepth 4 -type f -name "*.csv" -print -exec ls -lah {} \;
+          echo "Show jobs.csv preview (if exists):"
           ls -lah jobs.csv || true
           head -n 5 jobs.csv || true
-
-      - name: Debug git state
-        run: |
-          echo "Branch:"
-          git branch --show-current || true
-          echo "HEAD:"
-          git rev-parse HEAD
-          git log -1 --oneline
           echo "Git status:"
           git status
+          echo "Branch:"
+          git branch --show-current || true
 
-
-      - name: Configure git
+      - name: Configure git author
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Commit jobs.csv if non-empty
+      - name: Commit and push jobs.csv if changed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ ! -f jobs.csv ]; then
             echo "jobs.csv missing; nothing to commit"
             exit 0
           fi
-          # Header-only CSV has 1 line. Require at least 2 lines.
+
+          # Optional: avoid committing header-only files
           LINES=$(wc -l < jobs.csv | tr -d ' ')
           echo "jobs.csv line count: $LINES"
           if [ "$LINES" -le 1 ]; then
             echo "jobs.csv is empty (header only). Not committing."
             exit 0
           fi
-          pwd
-          ls -lah
-          echo "=== jobs.csv preview ==="
-          wc -l jobs.csv || true
-          head -n 3 jobs.csv || true
-          tail -n 3 jobs.csv || true
 
-          echo "=== git status before add ==="
-          git status
-          git diff --stat || true
+          echo "Git status before add:"
+          git status --porcelain
 
           git add jobs.csv
-          git commit -m "Update jobs.csv" || echo "No changes to commit"
-          git push
+
+          echo "Staged diff stat:"
+          git diff --staged --stat || true
+
+          # If nothing staged, exit cleanly
+          if git diff --staged --quiet; then
+            echo "No changes in jobs.csv to commit."
+            exit 0
+          fi
+
+          git commit -m "Update jobs.csv"
+
+          # Push back to the same branch that triggered the workflow
+          BRANCH="${GITHUB_REF_NAME}"
+          echo "Pushing to branch: $BRANCH"
+          git push origin "HEAD:$BRANCH"
