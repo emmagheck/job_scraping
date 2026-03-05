@@ -52,14 +52,10 @@ def normalize_state(name: str) -> str:
 
 
 ARL_START_URL = "https://www.arl.org/jobs/job-listings/"
-
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    }
+    "User-Agent": "EmmaJobBoardBot/1.0 (+https://github.com/yourusername/yourrepo)"
+}
+
 
 @dataclass
 class JobRow:
@@ -73,6 +69,7 @@ class JobRow:
     date_posted: str = ""
     description: str = ""
     apply_url: str = ""
+    source: str = ""          # e.g. "ARL", "ALA JobLIST", "Archives Gig"
 
 
 def clean_text(s: str) -> str:
@@ -216,7 +213,6 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
             html = fetch(url)
             postings, next_url = parse_arl_list_page(html, url)
             print(f"[INFO] ARL page {pages}: found {len(postings)} postings", file=sys.stderr)
-            print(f"[INFO] next_url: {next_url}", file=sys.stderr)
         except Exception as e:
             print(f"[ERROR] ARL list page fetch failed: {e}", file=sys.stderr)
             break
@@ -225,34 +221,274 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
             desc = ""
             try:
                 detail_html = fetch(durl)
+                raw_text = clean_text(detail_html)
                 desc = parse_arl_detail_page(detail_html, durl)
+                date_posted = extract_date_posted(desc)
+
             except Exception as e:
                 print(f"[WARN] Failed detail {durl}: {e}", file=sys.stderr)
 
             remote_type = infer_remote_type(desc)
+
+            # Infer sector from title + org + description rather than hardcoding "Academic"
+            sector = infer_sector_from_text(f"{title} {org} {desc}")
+
             rows.append(JobRow(
                 title=title[:255],
                 organization=org[:255] if org else "Unknown",
                 state=state,
-                sector=infer_sector(title, org, desc),
+                sector=sector,
                 remote_type=remote_type,
+                date_posted=date_posted,
+                apply_url=durl,
                 description=desc or f"Source: {durl}",
-                apply_url=durl,  # keep a URL for dedupe/import even if it's just the detail page
+                source="ARL",
             ))
 
-        # IMPORTANT: this must run once per page (not inside the for-loop)
         url = next_url
 
-    return rows
+    # De-dupe by title+org
+    uniq = {}
+    for r in rows:
+        key = (r.title.strip().lower(), r.apply_url.strip().lower())
+        uniq[key] = r
+    return list(uniq.values())
 
-def scrape_ala_joblist_placeholder() -> List[JobRow]:
+
+ALA_JOBLIST_BASE = "https://joblist.ala.org"
+ALA_JOBLIST_SEARCH = "https://joblist.ala.org/jobs/"
+
+# ALA JobLIST sector keywords → our canonical sector values
+ALA_SECTOR_MAP = {
+    "academic": "Academic",
+    "university": "Academic",
+    "college": "Academic",
+    "school": "Academic",
+    "public library": "Public",
+    "public": "Public",
+    "government": "Government",
+    "federal": "Government",
+    "state library": "Government",
+    "special": "Other",
+    "corporate": "Corporate",
+    "nonprofit": "Nonprofit",
+    "museum": "Museum",
+    "medical": "Medical",
+    "hospital": "Medical",
+    "health": "Medical",
+    "law": "Other",
+    "archive": "Other",
+}
+
+
+def infer_sector_from_text(text: str) -> str:
+    """Guess sector from job title / org / description text."""
+    t = text.lower()
+    # Order matters — check more specific terms first
+    for keyword, sector in ALA_SECTOR_MAP.items():
+        if keyword in t:
+            return sector
+    return ""
+
+
+def parse_ala_salary(text: str):
     """
-    Placeholder because ALA JobLIST is currently serving a maintenance page.
-    Once it's back, we can implement either:
-      - RSS/custom RSS (if available for searches), or
-      - HTML parsing for their results pages.
+    Extract salary_min and salary_max from strings like:
+      "$55,000 - $70,000"  "$80,000+"  "Commensurate with experience"
+    Returns (salary_min_str, salary_max_str) — both may be empty strings.
     """
-    return []
+    # Strip commas and find dollar amounts
+    nums = re.findall(r"\$[\d,]+", text)
+    cleaned = [int(n.replace("$", "").replace(",", "")) for n in nums]
+    if len(cleaned) >= 2:
+        return str(cleaned[0]), str(cleaned[1])
+    if len(cleaned) == 1:
+        return str(cleaned[0]), ""
+    return "", ""
+
+
+def parse_ala_list_page(html: str) -> list:
+    """
+    Parse one page of ALA JobLIST search results.
+    Returns list of (title, org, state, detail_url) tuples.
+
+    ALA JobLIST (Jobiqo platform) renders each result as an <article>
+    or a list item with class "views-row". We try both patterns so this
+    stays resilient if they tweak their markup.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+
+    # Pattern A: <article> tags (Jobiqo standard)
+    articles = soup.find_all("article")
+
+    # Pattern B: fallback — divs/lis with a job-title link
+    if not articles:
+        articles = soup.find_all(class_=re.compile(r"views-row|job[-_]result|job[-_]listing"))
+
+    for article in articles:
+        # Title + detail URL
+        title_tag = (
+            article.find("h2")
+            or article.find("h3")
+            or article.find(class_=re.compile(r"job[-_]title|title|views-field-title"))
+        )
+        if not title_tag:
+            continue
+        link = title_tag.find("a", href=True) or article.find("a", href=True)
+        if not link:
+            continue
+
+        title = clean_text(title_tag.get_text())
+        detail_url = urljoin(ALA_JOBLIST_BASE, link["href"])
+
+        # Organisation
+        org_tag = article.find(class_=re.compile(r"organization|employer|company|field-name-field-job-organization"))
+        org = clean_text(org_tag.get_text()) if org_tag else "Unknown"
+
+        # Location → state
+        loc_tag = article.find(class_=re.compile(r"location|field-name-field-job-location|city"))
+        loc_text = clean_text(loc_tag.get_text()) if loc_tag else ""
+        state = ""
+        if loc_text:
+            # Try full state name first, then abbreviation
+            for full, abbr in US_STATE_TO_ABBR.items():
+                if full.lower() in loc_text.lower():
+                    state = abbr
+                    break
+            if not state:
+                m = re.search(r"\b([A-Z]{2})\b", loc_text)
+                if m and m.group(1) in STATE_ABBR:
+                    state = m.group(1)
+
+        results.append((title, org, state, detail_url))
+
+    # De-dupe within the page by detail URL
+    seen = set()
+    out = []
+    for item in results:
+        if item[3] not in seen:
+            seen.add(item[3])
+            out.append(item)
+    return out
+
+
+def parse_ala_next_url(html: str, current_url: str) -> str:
+    """Return the URL of the next results page, or empty string."""
+    soup = BeautifulSoup(html, "html.parser")
+    # Jobiqo uses rel="next" on pagination links
+    next_link = soup.find("a", rel="next") or soup.find("a", string=re.compile(r"next|›|»", re.I))
+    if next_link and next_link.get("href"):
+        return urljoin(current_url, next_link["href"])
+    return ""
+
+
+def parse_ala_detail_page(html: str, url: str):
+    """
+    Scrape a single ALA JobLIST job detail page.
+    Returns (description, date_posted, salary_min, salary_max, sector, remote_type).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    main = soup.find("main") or soup.find("article") or soup
+
+    full_text = clean_description(clean_text(main.get_text(" ")))
+
+    # Date posted — ALA uses labels like "Date Posted:", "Posted:", "Closing Date:"
+    date_posted = ""
+    m = re.search(r"(?:date\s*posted|posted\s*on|posted)[\s:]+([A-Za-z]+\s+\d{1,2},?\s+\d{4})", full_text, re.I)
+    if m:
+        for fmt in ("%B %d, %Y", "%B %d %Y", "%b %d, %Y", "%b %d %Y"):
+            try:
+                date_posted = datetime.strptime(m.group(1).strip(), fmt).date().isoformat()
+                break
+            except ValueError:
+                continue
+    if not date_posted:
+        # Try numeric date like 03/15/2026
+        m = re.search(r"(?:date\s*posted|posted)[\s:]+(\d{1,2}/\d{1,2}/\d{4})", full_text, re.I)
+        if m:
+            try:
+                date_posted = datetime.strptime(m.group(1), "%m/%d/%Y").date().isoformat()
+            except ValueError:
+                pass
+
+    # Salary
+    salary_min, salary_max = "", ""
+    m = re.search(r"(?:salary|compensation|pay)[\s:]+([^\n]{5,80})", full_text, re.I)
+    if m:
+        salary_min, salary_max = parse_ala_salary(m.group(1))
+
+    # Sector — infer from full text
+    sector = infer_sector_from_text(full_text)
+
+    # Remote type
+    remote_type = infer_remote_type(full_text)
+
+    description = f"{full_text[:4000]}\n\nSource: {url}"
+    return description, date_posted, salary_min, salary_max, sector, remote_type
+
+
+def scrape_ala_joblist(max_pages: int = 10) -> List[JobRow]:
+    """
+    Scrape ALA JobLIST (joblist.ala.org).
+    Paginates through search results, then fetches each detail page.
+    """
+    rows: List[JobRow] = []
+    url = ALA_JOBLIST_SEARCH
+    pages = 0
+
+    while url and pages < max_pages:
+        pages += 1
+        try:
+            html = fetch(url)
+            postings = parse_ala_list_page(html)
+            next_url = parse_ala_next_url(html, url)
+            print(f"[INFO] ALA JobLIST page {pages}: found {len(postings)} postings", file=sys.stderr)
+        except Exception as e:
+            print(f"[ERROR] ALA JobLIST list page failed: {e}", file=sys.stderr)
+            break
+
+        if not postings:
+            print(f"[WARN] ALA JobLIST page {pages}: no postings parsed — site structure may have changed", file=sys.stderr)
+            break
+
+        for title, org, state, durl in postings:
+            desc, date_posted, salary_min, salary_max, sector, remote_type = "", "", "", "", "", ""
+            try:
+                detail_html = fetch(durl)
+                desc, date_posted, salary_min, salary_max, sector, remote_type = parse_ala_detail_page(detail_html, durl)
+            except Exception as e:
+                print(f"[WARN] ALA JobLIST detail fetch failed {durl}: {e}", file=sys.stderr)
+                desc = f"Source: {durl}"
+
+            # If sector inference failed, try from title + org
+            if not sector:
+                sector = infer_sector_from_text(f"{title} {org}")
+
+            rows.append(JobRow(
+                title=title[:255],
+                organization=org[:255],
+                state=state,
+                sector=sector,
+                remote_type=remote_type,
+                salary_min=salary_min,
+                salary_max=salary_max,
+                date_posted=date_posted,
+                apply_url=durl,
+                description=desc,
+                source="ALA JobLIST",
+            ))
+
+        url = next_url
+
+    # De-dupe within source by title + url
+    uniq = {}
+    for r in rows:
+        key = (r.title.strip().lower(), r.apply_url.strip().lower())
+        uniq[key] = r
+
+    print(f"[INFO] ALA JobLIST: {len(uniq)} unique jobs scraped", file=sys.stderr)
+    return list(uniq.values())
 
 
 def infer_remote_type(text: str) -> str:
@@ -266,74 +502,6 @@ def infer_remote_type(text: str) -> str:
     if "on-site" in t or "onsite" in t or "in person" in t:
         return "Onsite"
     return ""
-
-def infer_sector(title: str, organization: str, description: str) -> str:
-    text = f"{title} {organization} {description}".lower()
-
-    # --- Museum first (so "museum library" doesn't become Public/Academic) ---
-    museum_terms = [
-        "museum", "curator", "curatorial", "collections manager", "registrar",
-        "exhibitions", "exhibit", "gallery", "conservation", "conservator",
-        "archives and museum", "museum archives", "museum librarian",
-    ]
-    if any(t in text for t in museum_terms):
-        return "Museum"
-
-    # --- Government ---
-    gov_terms = [
-        "library of congress", "national archives", "state archives", "county",
-        "city of ", "department of ", "dept. of ", "ministry", "government",
-        "federal", "state of ", "commonwealth", "municipal", "public records",
-        "secretary of state", "u.s.", "us ", "usa", "courthouse",
-    ]
-    gov_domains = [".gov", ".mil"]
-    if any(t in text for t in gov_terms) or any(d in text for d in gov_domains):
-        return "Government"
-
-    # --- Academic ---
-    academic_terms = [
-        "university", "college", "community college", "campus",
-        "school of", "faculty", "student", "academic", "higher ed",
-        "library services (university)", "research library",
-    ]
-    if any(t in text for t in academic_terms):
-        return "Academic"
-
-    # --- Medical ---
-    medical_terms = [
-        "hospital", "health", "medical", "clinic", "medicine",
-        "nursing", "clinical", "patient", "health sciences",
-    ]
-    if any(t in text for t in medical_terms):
-        return "Medical"
-
-    # --- Corporate ---
-    corporate_terms = [
-        "inc.", "llc", "l.l.c", "corporation", "corp", "company",
-        "systems", "solutions", "consulting", "vendor", "sales",
-        "client", "product", "startup",
-    ]
-    if any(t in text for t in corporate_terms):
-        return "Corporate"
-
-    # --- Nonprofit ---
-    nonprofit_terms = [
-        "foundation", "nonprofit", "non-profit", "charity",
-        "association", "society", "institute", "ngo",
-    ]
-    if any(t in text for t in nonprofit_terms):
-        return "Nonprofit"
-
-    # --- Public (public library / public-facing library system) ---
-    public_terms = [
-        "public library", "library system", "branch library",
-        "county library", "city library", "municipal library",
-    ]
-    if any(t in text for t in public_terms):
-        return "Public"
-
-    return "Other"
-
 
 def parse_date_any(s: str) -> str:
     """Return YYYY-MM-DD or empty string."""
@@ -359,48 +527,12 @@ def iso_date_from_entry(entry) -> str:
     except Exception:
         return ""
 
-def canonicalize(s: str) -> str:
-    s = clean_text(s).lower()
-    s = s.replace("—", "-").replace("–", "-")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def parse_archivesgig_title(raw_title: str):
-    """
-    ArchivesGig titles often look like:
-      'City, ST: Job Title, Organization'
-      'Remote: Job Title, Organization'
-      'Job Title, Organization'
-    Return: (title, org, state_guess)
-    """
-    t = clean_text(raw_title)
-    state_guess = ""
-
-    # City, ST: ...
-    m = re.match(r"^.*,\s*([A-Z]{2})\s*:\s*(.*)$", t)
-    if m and m.group(1) in STATE_ABBR:
-        state_guess = m.group(1)
-        t = m.group(2)
-
-    # Remote/Hybrid/Onsite prefix
-    t = re.sub(r"^(remote|hybrid|onsite|on-site|in person)\s*:\s*", "", t, flags=re.I)
-
-    # Split on last comma -> org is often the last chunk
-    org = ""
-    title = t
-    if ", " in t:
-        title, org = t.rsplit(", ", 1)
-
-    return clean_text(title), clean_text(org), state_guess
-
 def scrape_archivesgig(max_items: int = 80) -> List[JobRow]:
     rows: List[JobRow] = []
     d = feedparser.parse(ARCHIVESGIG_RSS)
 
     for entry in (d.entries or [])[:max_items]:
-        raw_title = getattr(entry, "title", "") or ""
-        title, org_from_title, state_from_title = parse_archivesgig_title(raw_title)
-
+        title = clean_text(getattr(entry, "title", ""))[:255]
         url = getattr(entry, "link", "") or ""
 
         # Prefer full content if available, otherwise summary
@@ -411,154 +543,31 @@ def scrape_archivesgig(max_items: int = 80) -> List[JobRow]:
             except Exception:
                 pass
 
-        text_for_inference = f"{title} {org_from_title} {body}"
-
-        # Prefer the state in the prefix if present, otherwise infer
-        state = state_from_title or extract_state(text_for_inference)
-
-        remote_type = infer_remote_type(text_for_inference)
-        date_posted = iso_date_from_entry(entry)
-
-        rows.append(JobRow(
-            title=title[:255] if title else clean_text(raw_title)[:255],
-            organization=org_from_title[:255] if org_from_title else "Unknown",
-            state=state,
-            sector=infer_sector(title, "Unknown", body),
-            remote_type=remote_type,
-            salary_min="",
-            salary_max="",
-            date_posted=date_posted,
-            apply_url=url,
-            description=(body[:4000] + (f"\n\nSource: {url}" if url else ""))
-        ))
-
-    return rows
-
-HIGHEREDJOBS_FEEDS = [
-    ("https://www.higheredjobs.com/rss/categoryFeed.cfm?catID=182", "HigherEdJobs (Library & Info Science)"),
-    ("https://www.higheredjobs.com/rss/categoryFeed.cfm?catID=34",  "HigherEdJobs (catID 34)"),
-]
-
-def parse_higheredjobs_org_from_detail(html: str) -> str:
-    soup = BeautifulSoup(html, "html.parser")
-    a = soup.select_one("div.job-inst a")
-    if a:
-        return clean_text(a.get_text())
-    div = soup.select_one("div.job-inst")
-    if div:
-        return clean_text(div.get_text())
-    return ""
-
-def parse_higheredjobs_apply_url_from_detail(html: str, base_url: str = "https://www.higheredjobs.com") -> str:
-    soup = BeautifulSoup(html, "html.parser")
-    a = soup.select_one("a#js-applyurl")
-    if not a:
-        return ""
-    # Prefer the real external employer URL if present
-    real = a.get("data-orig-href")
-    if real:
-        return real
-    href = a.get("href") or ""
-    if href.startswith("/"):
-        return urljoin(base_url, href)
-    return href
-
-
-def split_title_org(raw_title: str):
-    """
-    Many job feeds use patterns like:
-      'Job Title - University Name'
-      'Job Title — University Name'
-    Returns (title, org)
-    """
-    t = clean_text(raw_title)
-    for sep in [" — ", " - ", " – "]:
-        if sep in t:
-            left, right = t.split(sep, 1)
-            left, right = clean_text(left), clean_text(right)
-            # avoid bad splits on titles that contain hyphens
-            if left and right and len(right) <= 80:
-                return left, right
-    return t, ""
-
-def scrape_higheredjobs_feed(feed_url: str, sector: str, max_items: int = 200) -> List[JobRow]:
-    rows: List[JobRow] = []
-
-    xml = fetch(feed_url)  # uses requests.get + raise_for_status
-
-    # --- DEBUG: confirm we got RSS/XML, not an HTML block page ---
-    head = xml.lstrip()[:200].lower()
-    if not (head.startswith("<?xml") or "<rss" in head or "<feed" in head):
-        print(f"[WARN] HigherEdJobs feed did not look like RSS. First 200 chars:\n{xml[:200]}", file=sys.stderr)
-        return []
-
-    d = feedparser.parse(xml)
-    if getattr(d, "bozo", 0):
-        print(f"[WARN] HigherEdJobs feedparser bozo=1: {getattr(d,'bozo_exception',None)}", file=sys.stderr)
-
-    entries = d.entries or []
-    print(f"[INFO] HigherEdJobs ({sector}): found {len(entries)} entries", file=sys.stderr)
-
-    for entry in entries[:max_items]:
-        title = clean_text(getattr(entry, "title", ""))[:255]
-        url = getattr(entry, "link", "") or ""
-
-        # Keep raw HTML for parsing institution/apply link
-        raw_body = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
-        body = clean_text(raw_body)
-
-        organization = "Unknown"
-        apply_url = url  # default: RSS link
-
-                # Fetch the detail page to get institution + real apply URL
-        if url:
-            try:
-                detail_html = fetch(url)
-
-                org_detail = parse_higheredjobs_org_from_detail(detail_html)
-                if org_detail:
-                    organization = org_detail[:255]
-
-                apply_detail = parse_higheredjobs_apply_url_from_detail(detail_html)
-                if apply_detail:
-                    apply_url = apply_detail
-            except Exception as e:
-                print(f"[WARN] HigherEdJobs detail fetch failed: {url} ({e})", file=sys.stderr)
-
-
-
-        text_for_inference = f"{title} {organization} {body}"
+        text_for_inference = f"{title} {body}"
         state = extract_state(text_for_inference)
         remote_type = infer_remote_type(text_for_inference)
         date_posted = iso_date_from_entry(entry)
 
         rows.append(JobRow(
             title=title,
-            organization=organization,
+            organization="Unknown",   # we can improve this later with heuristics
             state=state,
-            sector=infer_sector(title, organization, body),
+            sector="Other",
             remote_type=remote_type,
             salary_min="",
             salary_max="",
             date_posted=date_posted,
-            apply_url=apply_url,
+            apply_url=url,            # RSS link is your apply/source link
             description=(body[:4000] + (f"\n\nSource: {url}" if url else "")),
+            source="Archives Gig",
         ))
-
-    return rows
-
-def scrape_higheredjobs_all(max_items_each: int = 100) -> List[JobRow]:
-    rows: List[JobRow] = []
-    for url, label in HIGHEREDJOBS_FEEDS:
-        rows += scrape_higheredjobs_feed("https://www.higheredjobs.com/rss/categoryFeed.cfm?catID=182", "Academic")
-        rows += scrape_higheredjobs_feed("https://www.higheredjobs.com/rss/categoryFeed.cfm?catID=34", "Academic")
 
     return rows
 
 
 def write_csv(rows: List[JobRow], path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["title", "organization", "state", "sector", "remote_type", "salary_min", "salary_max", "date_posted", "apply_url", "description"])
+        writer = csv.DictWriter(f, fieldnames=["title", "organization", "state", "sector", "remote_type", "salary_min", "salary_max", "date_posted", "apply_url", "description", "source"])
         writer.writeheader()
         for r in rows:
             writer.writerow({
@@ -572,47 +581,15 @@ def write_csv(rows: List[JobRow], path: str) -> None:
                 "date_posted": r.date_posted,
                 "apply_url": r.apply_url,
                 "description": r.description,
+                "source": r.source,
             })
-
-def dedupe_rows(rows: List[JobRow]) -> List[JobRow]:
-    uniq = {}
-
-    for r in rows:
-        title_key = canonicalize(r.title)
-        org_key = canonicalize(r.organization)
-
-        if not org_key or org_key in {"unknown", "n/a", "-"}:
-            key = ("url", canonicalize(r.apply_url))
-        else:
-            key = ("job", title_key, org_key)
-
-        existing = uniq.get(key)
-        if not existing:
-            uniq[key] = r
-            continue
-
-        def score(x: JobRow) -> int:
-            s = 0
-            if x.apply_url: s += 3
-            if x.date_posted: s += 2
-            if x.state: s += 1
-            if x.remote_type: s += 1
-            if x.salary_min or x.salary_max: s += 1
-            s += min(len(x.description or ""), 2000) // 500
-            return s
-
-        if score(r) > score(existing):
-            uniq[key] = r
-
-    return list(uniq.values())
 
 
 if __name__ == "__main__":
     rows = []
     rows += scrape_arl(max_pages=5)
-    rows += scrape_ala_joblist_placeholder()
+    rows += scrape_ala_joblist(max_pages=10)
     rows += scrape_archivesgig(max_items=80)
-    rows += scrape_higheredjobs_all(max_items_each=120)
-    rows = dedupe_rows(rows)
+
     write_csv(rows, "jobs.csv")
     print(f"Wrote {len(rows)} jobs to jobs.csv")
