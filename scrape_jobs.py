@@ -76,6 +76,34 @@ def clean_text(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
 
 
+def extract_state_from_detail(text: str) -> str:
+    """
+    Pull a US state from ARL detail page text.
+    Tries structured labels first ("Job Location: New Jersey"),
+    then falls back to scanning for ", ST" or "(ST)" patterns.
+    """
+    # Structured label — ARL detail pages repeat "Job Location: StateName"
+    m = re.search(r"Job Location[:\s]+([A-Za-z][A-Za-z ]+?)(?:\s{2,}|,|\n|$)", text, re.IGNORECASE)
+    if m:
+        candidate = clean_text(m.group(1))
+        if candidate.upper() in STATE_ABBR:
+            return candidate.upper()
+        for full, abbr in US_STATE_TO_ABBR.items():
+            if full.lower() == candidate.lower():
+                return abbr
+        if any(x in candidate.lower() for x in {"washington dc", "district of columbia"}):
+            return "DC"
+
+    # Fallback: "City, ST" pattern — find the LAST match to avoid false positives in body text
+    matches = list(re.finditer(r",\s*([A-Z]{2})\b", text))
+    for m in reversed(matches):
+        abbr = m.group(1)
+        if abbr in STATE_ABBR:
+            return abbr
+
+    return ""
+
+
 import time
 import requests
 
@@ -128,13 +156,30 @@ def parse_arl_list_page(html: str, base_url: str):
                 before_loc = before_loc[len(title):].strip()
             org = clean_text(before_loc) or "Unknown"
 
-        # State name after "Job Location:" (ARL uses full state names like "New York")
+        # State name after "Job Location:"
+        # ARL uses full state names ("New York") but also "City, ST" combos.
+        # The list-page text blobs everything together so we stop at known terminators.
         state = ""
-        m = re.search(r"Job Location:\s*([A-Za-z ]+)", text)
+        m = re.search(
+            r"Job Location:\s*([A-Za-z][A-Za-z ,\.]+?)(?:\s+(?:Apply By|Date Created|Read more)|$)",
+            text,
+            re.IGNORECASE,
+        )
         if m:
-            state_name = clean_text(m.group(1))
-            state = US_STATE_TO_ABBR.get(state_name, "")
-            if state_name.lower() in {"washington dc", "district of columbia"}:
+            loc_raw = clean_text(m.group(1))
+            # Try each comma-separated part — reversed so "New York, NY" hits "NY" first
+            for part in reversed(loc_raw.split(",")):
+                part = part.strip()
+                if part.upper() in STATE_ABBR:
+                    state = part.upper()
+                    break
+                for full, abbr in US_STATE_TO_ABBR.items():
+                    if full.lower() == part.lower():
+                        state = abbr
+                        break
+                if state:
+                    break
+            if not state and any(x in loc_raw.lower() for x in {"washington dc", "district of columbia"}):
                 state = "DC"
 
         detail_url = urljoin(base_url, readmore["href"])
@@ -219,11 +264,15 @@ def scrape_arl(max_pages: int = 5) -> List[JobRow]:
 
         for title, org, state, durl in postings:
             desc = ""
+            date_posted = ""
             try:
                 detail_html = fetch(durl)
-                raw_text = clean_text(detail_html)
                 desc = parse_arl_detail_page(detail_html, durl)
                 date_posted = extract_date_posted(desc)
+
+                # Fallback: if list page didn't give us a state, try the detail page text
+                if not state:
+                    state = extract_state_from_detail(desc)
 
             except Exception as e:
                 print(f"[WARN] Failed detail {durl}: {e}", file=sys.stderr)
