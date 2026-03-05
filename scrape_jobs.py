@@ -576,6 +576,81 @@ def iso_date_from_entry(entry) -> str:
     except Exception:
         return ""
 
+def parse_archivesgig_org(title: str, html_body: str) -> str:
+    """
+    Extract organisation name from an Archives Gig entry.
+    Tries the structured "Name of Employer:" HTML field first,
+    then falls back to the title pattern "City, ST: Job Title, Org Name".
+    """
+    # 1. Structured HTML field
+    soup = BeautifulSoup(html_body, "html.parser")
+    for strong in soup.find_all("strong"):
+        if "name of employer" in strong.get_text().lower():
+            parent = strong.parent
+            text = parent.get_text(" ")
+            m = re.search(r"Name of Employer[:\s]+(.+)", text, re.IGNORECASE)
+            if m:
+                org = clean_text(m.group(1))
+                if org:
+                    return org[:255]
+            break
+
+    # 2. Title pattern: "City, ST: Job Title, Org Name"  or  "City, ST/Remote: Job Title, Org Name"
+    #    Split on the first colon to drop the location prefix, then take everything after the last comma
+    if ":" in title:
+        after_colon = title.split(":", 1)[1].strip()
+        # The org is after the last comma in the remaining string
+        if "," in after_colon:
+            org = after_colon.rsplit(",", 1)[-1].strip()
+            if org:
+                return org[:255]
+
+    return "Unknown"
+
+
+def parse_archivesgig_sector(title: str, org: str, html_body: str) -> str:
+    """
+    Infer sector from org name, job title, and description text.
+    Archives Gig doesn't publish a sector field so we rely on keyword matching.
+    """
+    combined = f"{title} {org} {html_body}".lower()
+
+    # Museum / cultural institution — check before academic so "university art museum" → Museum
+    if any(w in combined for w in ["museum", "gallery", "historic", "historical society",
+                                    "preservation", "heritage", "cultural center"]):
+        return "Museum"
+
+    # Academic
+    if any(w in combined for w in ["university", "college", "academic", "school of",
+                                    "institute of technology", "suny", "cuny"]):
+        return "Academic"
+
+    # Government
+    if any(w in combined for w in ["state archive", "national archive", "federal", "government",
+                                    "state library", "congressional", "municipal", "county"]):
+        return "Government"
+
+    # Medical
+    if any(w in combined for w in ["hospital", "medical", "health system", "clinic"]):
+        return "Medical"
+
+    # Nonprofit
+    if any(w in combined for w in ["foundation", "society", "alliance", "association",
+                                    "institute", "nonprofit", "non-profit", "conservancy",
+                                    "trust", "fund "]):
+        return "Nonprofit"
+
+    # Public library
+    if "public library" in combined or "public libraries" in combined:
+        return "Public"
+
+    # Corporate
+    if any(w in combined for w in ["corporation", "inc.", "llc", "ltd", "corporate"]):
+        return "Corporate"
+
+    return "Other"
+
+
 def scrape_archivesgig(max_items: int = 80) -> List[JobRow]:
     rows: List[JobRow] = []
     d = feedparser.parse(ARCHIVESGIG_RSS)
@@ -584,30 +659,39 @@ def scrape_archivesgig(max_items: int = 80) -> List[JobRow]:
         title = clean_text(getattr(entry, "title", ""))[:255]
         url = getattr(entry, "link", "") or ""
 
-        # Prefer full content if available, otherwise summary
-        body = clean_text(getattr(entry, "summary", ""))
+        # Prefer full HTML content if available, otherwise summary
+        body = getattr(entry, "summary", "") or ""
         if hasattr(entry, "content") and entry.content:
             try:
-                body = clean_text(entry.content[0].value)
+                body = entry.content[0].value
             except Exception:
                 pass
 
-        text_for_inference = f"{title} {body}"
+        body_clean = clean_text(body)
+
+        org = parse_archivesgig_org(title, body)
+        sector = parse_archivesgig_sector(title, org, body_clean)
+
+        text_for_inference = f"{title} {org} {body_clean}"
         state = extract_state(text_for_inference)
         remote_type = infer_remote_type(text_for_inference)
         date_posted = iso_date_from_entry(entry)
 
+        # Strip HTML tags for the stored description
+        soup = BeautifulSoup(body, "html.parser")
+        desc_text = clean_text(soup.get_text(" "))
+
         rows.append(JobRow(
             title=title,
-            organization="Unknown",   # we can improve this later with heuristics
+            organization=org,
             state=state,
-            sector="Other",
+            sector=sector,
             remote_type=remote_type,
             salary_min="",
             salary_max="",
             date_posted=date_posted,
-            apply_url=url,            # RSS link is your apply/source link
-            description=(body[:4000] + (f"\n\nSource: {url}" if url else "")),
+            apply_url=url,
+            description=(desc_text[:4000] + (f"\n\nSource: {url}" if url else "")),
             source="Archives Gig",
         ))
 
